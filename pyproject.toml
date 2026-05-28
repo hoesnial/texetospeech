@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "texetospeech"
+version = "0.1.0"
+description = "Sistem speech to text to speech untuk aritmetika bilangan bulat Bahasa Indonesia."
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [
+  { name = "TexeToSpeech" }
+]
+dependencies = []
+
+[project.optional-dependencies]
+speech = [
+  "SpeechRecognition>=3.10",
+  "pyttsx3>=2.90"
+]
+stt = [
+  "openai-whisper>=20231117"
+]
+voice = [
+  "coqui-tts>=0.27.5",
+  "torchcodec>=0.11.1"
+]
+voice-light = [
+  "piper-tts>=1.2.0"
+]
+voice-medium = [
+  "coqui-tts>=0.27.5"
+]
+
+[project.scripts]
+texetospeech = "texetospeech.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

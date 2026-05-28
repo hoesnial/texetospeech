@@ -1,0 +1,62 @@
+001|nol
+002|satu
+003|dua
+004|tiga
+005|empat
+006|lima
+007|enam
+008|tujuh
+009|delapan
+010|sembilan
+011|sepuluh
+012|sebelas
+013|dua belas
+014|tiga belas
+015|empat belas
+016|lima belas
+017|enam belas
+018|tujuh belas
+019|delapan belas
+020|sembilan belas
+021|dua puluh
+022|dua puluh satu
+023|tiga puluh dua
+024|empat puluh tiga
+025|lima puluh empat
+026|enam puluh lima
+027|tujuh puluh enam
+028|delapan puluh tujuh
+029|sembilan puluh delapan
+030|seratus
+031|seratus satu
+032|seratus dua puluh tiga
+033|tambah
+034|kurang
+035|kali
+036|bagi
+037|sama dengan
+038|hasilnya
+039|jawabannya
+040|benar
+041|salah
+042|tidak dapat diproses
+043|hasil operasi ini bukan bilangan bulat
+044|satu tambah dua sama dengan tiga
+045|dua tambah tiga sama dengan lima
+046|tiga tambah empat sama dengan tujuh
+047|empat tambah lima sama dengan sembilan
+048|sepuluh kurang tiga sama dengan tujuh
+049|dua puluh kurang lima sama dengan lima belas
+050|tiga kali dua sama dengan enam
+051|empat kali lima sama dengan dua puluh
+052|dua puluh bagi lima sama dengan empat
+053|sembilan bagi tiga sama dengan tiga
+054|lima bagi dua tidak dapat diproses karena hasilnya bukan bilangan bulat
+055|satu tambah dua tambah tiga sama dengan enam
+056|Halo, nama saya sedang digunakan untuk sistem suara.
+057|Saya sedang membaca kalimat dengan jelas.
+058|Hari ini saya belajar membuat aplikasi speech to text dan text to speech.
+059|Sistem akan mendengarkan suara saya lalu mengubahnya menjadi teks.
+060|Setelah itu sistem menghitung operasi aritmetika dan membacakan hasilnya.
+061|Saya mengucapkan setiap kata dengan tempo yang stabil.
+062|Suara saya direkam di ruangan yang tenang.
