@@ -11,8 +11,67 @@ Sistem ini sudah mendukung:
 - validasi hasil agar tetap bilangan bulat,
 - pengecekan jawaban dengan frasa `sama dengan`,
 - CLI untuk teks, STT opsional, TTS, dan web app lokal,
-- rekam dataset suara pribadi,
-- build `speaker_reference.wav` untuk voice cloning opsional.
+- rekam dataset suara pribadi (langsung WAV via Web Audio API, tanpa ffmpeg),
+- **personal voice TTS**: output TTS pakai potongan rekaman suara sendiri tanpa torch / Coqui / Piper,
+- build `speaker_reference.wav` untuk voice cloning neural opsional.
+
+## Cara Cepat Pakai Suara Sendiri (MVP 0..10 + operator)
+
+Langkah ini fokus pada PRD: bilangan asli `0..10` dan simbol aritmetika dasar `+ - * :`.
+
+1. Jalankan web app:
+
+   ```bash
+   PYTHONPATH=src python -m texetospeech.cli web --port 8765
+   ```
+
+2. Buka `http://127.0.0.1:8765`.
+3. Di bagian **Dataset Suara Saya**, biarkan mode **MVP (0..10 + operator)** aktif.
+4. Klik **Rekam Prompt**, bacakan kata yang muncul, klik **Stop Rekam**. Ulangi sampai semua prompt MVP direkam (~31 prompt). Browser menyimpan WAV langsung, jadi tidak butuh ffmpeg.
+5. Centang **pakai suara saya (personal voice / dataset)** di bagian Text to Speech.
+6. Ketik `satu tambah dua tambah tiga`, klik **Hitung + Audio**.
+7. Audio yang diputar adalah suara sendiri (concatenative dari dataset).
+
+Lewat CLI, alur yang sama:
+
+```bash
+PYTHONPATH=src python -m texetospeech.cli text "satu tambah dua tambah tiga" --speak --out audio/jawaban.wav --my-voice
+```
+
+`--my-voice` aktif begitu folder `recordings/browser_dataset/` (atau `recordings/my_voice/`) berisi `metadata.csv` plus file WAV.
+
+## Speech to Text Tanpa Install Apapun
+
+Web app pakai **Web Speech API** browser (Chrome / Edge). Klik **Mulai Rekam** di bagian Speech to Text, ucapkan operasi aritmetika, sistem akan transkrip + hitung + bacakan.
+
+Untuk akurasi STT terbaik (offline, gratis, akurat untuk Bahasa Indonesia), install faster-whisper:
+
+```bash
+py -3.13 -m pip install faster-whisper
+```
+
+Sistem otomatis pakai model **`large-v3-turbo`** (1.5 GB, akurasi mendekati `large-v3` dengan kecepatan jauh lebih baik). Model auto-download saat pertama kali digunakan, lalu di-cache di `models/whisper/`.
+
+Set env `TEXETOSPEECH_WHISPER_MODEL` untuk ganti model:
+
+```bash
+$env:TEXETOSPEECH_WHISPER_MODEL="small"  # 466 MB, ringan tapi akurat
+```
+
+Pilihan: `tiny` `base` `small` `medium` `large-v3-turbo` `large-v3`.
+
+Untuk CLI tanpa whisper / SpeechRecognition, pakai mode transkrip manual:
+
+```bash
+PYTHONPATH=src python -m texetospeech.cli listen --transcript "satu tambah dua tambah tiga" --speak --out audio/jawaban.wav --my-voice
+```
+
+## "Suara Sendiri Persis" - Trade-off
+
+- **Concatenative (default `--my-voice`)** — output 100% potongan rekaman asli, tetapi kosakata dibatasi oleh dataset. Untuk teks di luar dataset, kata yang belum direkam tidak akan terdengar.
+- **Fine-tune Piper** — model neural yang dilatih dari rekaman sendiri. Setelah training di Google Colab, output bisa membaca teks bebas dengan suara mirip user. Kualitas tergantung jumlah dan kebersihan dataset (30+ menit ideal).
+
+Panduan fine-tune Piper lengkap di [docs/TRAINING_VOICE.md](docs/TRAINING_VOICE.md).
 
 ## Jalankan Tanpa Install
 

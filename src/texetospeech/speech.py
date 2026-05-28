@@ -39,6 +39,7 @@ from pathlib import Path
 
 from .audio import convert_to_wav
 from .errors import SpeechBackendError
+from . import personal_voice
 
 
 @dataclass(frozen=True)
@@ -112,6 +113,35 @@ def speak_text(
     """
 
     if voice_reference is not None:
+        # Backend paling andal untuk MVP: concatenative dari rekaman user.
+        # Hanya butuh stdlib, tidak butuh torch/Coqui/Piper. Ini yang membuat
+        # output benar-benar pakai suara user untuk vocabulary 0..10 + operator.
+        personal_result = _try_personal_voice(text, output_path)
+        if personal_result is not None:
+            return personal_result
+
+        # User eksplisit minta personal voice tetapi gagal. Jangan diam-diam
+        # fallback ke SAPI/tone — beri error jelas agar user tahu harus
+        # rekam dataset atau menonaktifkan opsi tersebut.
+        if not personal_voice.has_personal_voice_dataset():
+            raise SpeechBackendError(
+                "Voice profile diminta tetapi dataset rekaman pribadi kosong. "
+                "Buka web app dan rekam prompt MVP (angka 0..10 + operator) di "
+                "bagian 'Dataset Suara Saya', atau matikan opsi 'pakai suara "
+                "saya' untuk memakai TTS standar."
+            )
+
+        # Jika reference WAV tidak ada, backend neural juga akan gagal. Lewati
+        # dan jatuhkan ke TTS standar agar suara tetap keluar.
+        reference_exists = Path(str(voice_reference)).exists()
+        if not reference_exists:
+            print(
+                "[warn] Voice profile belum lengkap (speaker_reference.wav tidak ada "
+                "dan dataset belum cukup). Memakai TTS standar."
+            )
+            voice_reference = None
+
+    if voice_reference is not None:
         backend_choice = _select_voice_backend()
 
         # Try backends in order of preference based on auto-detection
@@ -164,9 +194,28 @@ def speak_text(
         if pyttsx3_result is not None:
             return pyttsx3_result
 
+        # Windows native fallback: SAPI lewat PowerShell. Tersedia di
+        # setiap Windows tanpa install. Suaranya English default (David /
+        # Zira) tetapi tetap suara manusia, lebih natural daripada tone.
+        try:
+            from . import sapi_tts
+
+            if sapi_tts.is_supported():
+                voice_hint = os.environ.get("TEXETOSPEECH_SAPI_VOICE") or "Indonesian"
+                sapi_tts.synthesize_to_wav(text, output, voice_hint=voice_hint)
+                return SpeechResult(
+                    text=text,
+                    backend="sapi-windows",
+                    output_path=str(output),
+                )
+        except Exception as exc:
+            print(f"[info] SAPI TTS tidak bisa dipakai: {exc}")
+
         raise SpeechBackendError(
             "Backend TTS untuk menyimpan audio belum tersedia. "
-            "Install espeak-ng, espeak, pyttsx3, atau piper-tts."
+            "Centang 'pakai suara saya' setelah merekam dataset di web app, "
+            "atau install espeak-ng / pyttsx3 / piper-tts. "
+            "Di Windows, pastikan PowerShell tersedia untuk fallback SAPI."
         )
 
     if shutil.which("spd-say"):
@@ -203,6 +252,19 @@ def transcribe_audio(
                 source_path=str(source),
             )
 
+        # Backend STT terbaik: faster-whisper. Akurat, offline, mendukung
+        # Indonesia. Auto-skip kalau package belum terinstall.
+        faster_result = _try_faster_whisper(source)
+        if faster_result is not None:
+            return faster_result
+
+        # Backend STT offline pakai dataset user. Tidak butuh whisper /
+        # SpeechRecognition. Vocabulary terbatas pada kata yang sudah direkam
+        # (sesuai PRD: angka 0..10 + operator dasar).
+        personal_stt_result = _try_personal_stt(source)
+        if personal_stt_result is not None:
+            return personal_stt_result
+
         whisper_result = _try_whisper_cli(source)
         if whisper_result is not None:
             return whisper_result
@@ -216,7 +278,9 @@ def transcribe_audio(
             return recognition_result
 
         raise SpeechBackendError(
-            "Backend STT untuk file audio belum tersedia. Install whisper CLI atau SpeechRecognition."
+            "Backend STT belum tersedia. Install faster-whisper "
+            "(`pip install faster-whisper`) untuk akurasi tinggi, atau rekam "
+            "dataset MVP di web app untuk pakai personal-stt offline."
         )
 
     recognition_result = _try_speech_recognition_microphone(language)
@@ -225,6 +289,122 @@ def transcribe_audio(
 
     raise SpeechBackendError(
         "Backend STT mikrofon belum tersedia. Install SpeechRecognition dan PyAudio."
+    )
+
+
+def _try_faster_whisper(source: Path) -> TranscriptResult | None:
+    """STT pakai faster-whisper. Auto-skip jika package belum terinstall."""
+
+    try:
+        from . import faster_whisper_stt
+    except Exception:
+        return None
+
+    if not faster_whisper_stt.is_installed():
+        return None
+
+    try:
+        text = faster_whisper_stt.transcribe(source)
+    except SpeechBackendError:
+        return None
+    except Exception as exc:
+        print(f"[info] faster-whisper gagal: {exc}")
+        return None
+
+    if not text:
+        return None
+
+    print(f"[info] faster-whisper transkrip: {text[:80]}")
+    return TranscriptResult(
+        text=text,
+        backend="faster-whisper",
+        source_path=str(source),
+    )
+
+
+def _try_personal_stt(source: Path) -> TranscriptResult | None:
+    """STT offline pakai template dataset user."""
+
+    try:
+        from . import personal_stt
+    except Exception:  # pragma: no cover - defensive import
+        return None
+
+    if not personal_stt.has_personal_stt_dataset():
+        return None
+
+    # Personal STT hanya jalan untuk file WAV. File webm/ogg/mp3 perlu dikonversi
+    # dulu, biarkan backend lain yang menangani.
+    try:
+        from .wav_utils import is_wav_file
+
+        if not is_wav_file(source):
+            return None
+    except Exception:
+        return None
+
+    try:
+        result = personal_stt.transcribe(source)
+    except SpeechBackendError as exc:
+        print(f"[info] Personal STT tidak menemukan kata: {exc.user_message}")
+        return None
+
+    print(
+        f"[info] Personal STT cocok {result.matched_count} kata dari "
+        f"{result.template_count} template (sim {result.similarity_min:.2f}.."
+        f"{result.similarity_max:.2f})."
+    )
+    return TranscriptResult(
+        text=result.text,
+        backend="personal-stt",
+        source_path=str(source),
+    )
+
+
+def _try_personal_voice(
+    text: str,
+    output_path: str | Path | None,
+) -> SpeechResult | None:
+    """Synthesize using user's recorded dataset (concatenative TTS).
+
+    Tidak butuh torch / Coqui / Piper. Cukup ada folder
+    `recordings/browser_dataset/` (atau `recordings/my_voice/`) berisi
+    rekaman user dan `metadata.csv`. Backend ini paling reliable di Windows
+    dan laptop low-spec, dan benar-benar menghasilkan suara user.
+
+    Set `TEXETOSPEECH_TTS_BACKEND=skip-personal` untuk melewati backend ini
+    (mis. saat ingin paksa pakai Piper/Coqui).
+    """
+
+    forced = os.environ.get("TEXETOSPEECH_TTS_BACKEND", "auto").strip().lower()
+    if forced == "skip-personal":
+        return None
+
+    if not personal_voice.has_personal_voice_dataset():
+        return None
+
+    if output_path is None:
+        # Personal voice butuh file output. Saat dipanggil tanpa --out kita
+        # jatuhkan ke backend lain agar suara tetap keluar live.
+        return None
+
+    output = Path(output_path)
+    # Saat dataset ada tetapi tidak cukup mencakup teks, biarkan SpeechBackendError
+    # naik ke caller agar user diberi tahu kata mana yang belum direkam — bukan
+    # diam-diam jatuh ke SAPI/espeak yang menghasilkan suara berbeda.
+    result = personal_voice.synthesize(text, output)
+
+    detail = ""
+    if result.missing_phrases:
+        detail = f" (kata belum direkam: {' '.join(result.missing_phrases)})"
+    print(
+        f"[info] Personal voice memakai {result.source_count} potongan rekaman"
+        f"{detail}."
+    )
+    return SpeechResult(
+        text=text,
+        backend="personal-voice",
+        output_path=result.output_path,
     )
 
 

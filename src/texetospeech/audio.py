@@ -11,6 +11,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from .errors import SpeechBackendError
+from .wav_utils import concat_wavs as concat_wavs_stdlib
+from .wav_utils import is_wav_file, normalize_wav
 
 
 @dataclass(frozen=True)
@@ -105,14 +107,26 @@ def convert_to_wav(
     *,
     sample_rate: int = 22050,
 ) -> Path:
-    """Convert browser/system audio into mono 16-bit WAV with ffmpeg."""
+    """Convert browser/system audio into mono 16-bit WAV.
 
-    if not shutil.which("ffmpeg"):
-        raise SpeechBackendError("Konversi audio membutuhkan ffmpeg.")
+    Untuk input yang sudah WAV, jalur stdlib digunakan agar tidak butuh
+    ffmpeg di Windows. Untuk webm/ogg/mp3, jatuh ke ffmpeg.
+    """
 
     source = Path(input_path)
     output = Path(output_path)
     output.parent.mkdir(parents=True, exist_ok=True)
+
+    if is_wav_file(source):
+        return normalize_wav(source, output, sample_rate=sample_rate)
+
+    if not shutil.which("ffmpeg"):
+        raise SpeechBackendError(
+            "Konversi audio non-WAV membutuhkan ffmpeg. Untuk dataset rekaman "
+            "browser, sistem sudah menyimpan WAV langsung sehingga ffmpeg "
+            "tidak diperlukan."
+        )
+
     _run(
         [
             "ffmpeg",
@@ -183,8 +197,23 @@ def _concat_wavs(
     *,
     sample_rate: int,
 ) -> None:
+    # Cek dulu apakah semua input sudah WAV. Kalau iya, gabung pakai stdlib
+    # tanpa butuh ffmpeg sama sekali.
+    if all(is_wav_file(path) for path in wav_files):
+        normalized: list[Path] = []
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            for index, wav_file in enumerate(wav_files, start=1):
+                target = temp / f"{index:03d}.wav"
+                normalize_wav(wav_file, target, sample_rate=sample_rate)
+                normalized.append(target)
+            concat_wavs_stdlib(normalized, output_path, sample_rate=sample_rate)
+        return
+
     if not shutil.which("ffmpeg"):
-        raise SpeechBackendError("Membuat voice profile membutuhkan ffmpeg.")
+        raise SpeechBackendError(
+            "Membuat voice profile dari format non-WAV membutuhkan ffmpeg."
+        )
 
     with tempfile.TemporaryDirectory() as temp_dir:
         temp = Path(temp_dir)

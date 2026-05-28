@@ -9,7 +9,9 @@ dist/
 build/
 *.egg-info/
 audio/
-recordings/
+recordings/*
+!recordings/.gitkeep
+!recordings/README.md
 uploads/
 voice_profiles/
 models/

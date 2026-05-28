@@ -95,6 +95,13 @@ class ArithmeticEngineTest(unittest.TestCase):
         self.assertEqual(result.result, 4)
         self.assertFalse(result.is_answer_check)
 
+    def test_whisper_sepuluh_x_is_normalized_to_belasan(self) -> None:
+        # Whisper kadang mentranskrip "empat belas" sebagai "sepuluh empat".
+        result = evaluate_text("sepuluh empat tambah dua")
+        self.assertEqual(result.expression, "14 + 2")
+        self.assertEqual(result.result, 16)
+        self.assertEqual(result.result_words, "enam belas")
+
 
 if __name__ == "__main__":
     unittest.main()

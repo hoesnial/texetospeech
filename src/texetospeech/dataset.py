@@ -74,12 +74,67 @@ PROMPTS: list[str] = [
 ]
 
 
-def write_prompts(path: str | Path) -> Path:
-    """Write numbered prompts to a UTF-8 text file."""
+# Subset prompt khusus MVP: bilangan asli 0..10 + simbol aritmatika dasar
+# (+, -, *, :) plus kosakata jawaban. Cukup untuk membuat backend
+# personal-voice (concatenative) bisa membaca seluruh expected output PRD.
+PROMPTS_MVP: list[str] = [
+    # Angka 0..10
+    "nol",
+    "satu",
+    "dua",
+    "tiga",
+    "empat",
+    "lima",
+    "enam",
+    "tujuh",
+    "delapan",
+    "sembilan",
+    "sepuluh",
+    # Operator dasar
+    "tambah",
+    "kurang",
+    "kali",
+    "bagi",
+    "sama dengan",
+    # Jawaban
+    "jawaban benar",
+    "jawaban salah",
+    "hasil yang benar adalah",
+    "hasil operasi ini bukan bilangan bulat",
+    "jadi tidak dapat diproses",
+    "pembagian dengan nol tidak dapat diproses",
+    "maaf",
+    "saya belum bisa mengenali operasi tersebut",
+    # Kalimat lengkap (longest-match memberi suara paling natural)
+    "satu tambah dua sama dengan tiga",
+    "dua tambah tiga sama dengan lima",
+    "tiga tambah empat sama dengan tujuh",
+    "lima tambah lima sama dengan sepuluh",
+    "sepuluh kurang tiga sama dengan tujuh",
+    "delapan kurang dua sama dengan enam",
+    "tiga kali dua sama dengan enam",
+    "dua kali empat sama dengan delapan",
+    "sepuluh bagi dua sama dengan lima",
+    "enam bagi tiga sama dengan dua",
+    "satu tambah dua tambah tiga sama dengan enam",
+]
+
+
+def write_prompts(path: str | Path, *, scope: str = "full") -> Path:
+    """Write numbered prompts to a UTF-8 text file.
+
+    scope:
+      - "full": semua prompt (angka 0..123, operator, dan kalimat natural)
+      - "mvp" : subset PRD (angka 0..10 + operator dasar + frasa jawaban)
+    """
 
     output_path = Path(path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    lines = [f"{index:03d}|{prompt}" for index, prompt in enumerate(PROMPTS, start=1)]
+    if scope == "mvp":
+        prompts = PROMPTS_MVP
+    else:
+        prompts = PROMPTS
+    lines = [f"{index:03d}|{prompt}" for index, prompt in enumerate(prompts, start=1)]
     output_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return output_path
 

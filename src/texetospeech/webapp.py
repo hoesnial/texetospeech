@@ -50,7 +50,11 @@ class TexeToSpeechHandler(BaseHTTPRequestHandler):
             self._send_html(INDEX_HTML)
             return
         if parsed.path == "/api/prompts":
-            self._send_json({"prompts": PROMPTS})
+            params = parse_qs(parsed.query)
+            scope = params.get("scope", ["full"])[0]
+            from .dataset import PROMPTS_MVP
+            prompts = PROMPTS_MVP if scope == "mvp" else PROMPTS
+            self._send_json({"prompts": prompts, "scope": scope})
             return
         if parsed.path.startswith("/audio/"):
             self._serve_audio(parsed.path.removeprefix("/audio/"))
@@ -118,7 +122,9 @@ class TexeToSpeechHandler(BaseHTTPRequestHandler):
         if content_type.startswith("application/json"):
             payload = json.loads(body.decode("utf-8"))
             transcript_text = str(payload.get("transcript", "")).strip()
-            transcript_backend = "manual-transcript"
+            transcript_backend = str(payload.get("backend", "manual-transcript"))
+            if not transcript_text:
+                raise TexeToSpeechError("Transkrip kosong.")
         else:
             suffix = _suffix_for_content_type(content_type)
             upload_path = self._write_binary(
@@ -152,27 +158,49 @@ class TexeToSpeechHandler(BaseHTTPRequestHandler):
         content_type = self.headers.get("Content-Type", "")
         suffix = _suffix_for_content_type(content_type)
         dataset_dir = self.server.config.dataset_dir
-        raw_path = self._write_binary(dataset_dir / "raw", f"{index:03d}{suffix}", self._read_body())
+        body = self._read_body()
         wav_path = dataset_dir / f"{index:03d}.wav"
-        convert_to_wav(raw_path, wav_path)
+        backend = "browser-mediarecorder"
+
+        if suffix == ".wav":
+            # Browser already encoded WAV via Web Audio API. Tulis langsung,
+            # tidak perlu ffmpeg sama sekali. Ini jalur Windows-friendly.
+            wav_path.parent.mkdir(parents=True, exist_ok=True)
+            wav_path.write_bytes(body)
+            backend = "browser-webaudio-wav"
+        else:
+            # Fallback: MediaRecorder webm/opus -> ffmpeg -> wav.
+            raw_path = self._write_binary(
+                dataset_dir / "raw", f"{index:03d}{suffix}", body
+            )
+            convert_to_wav(raw_path, wav_path)
+
         metadata_path = append_metadata(
             dataset_dir,
             index=index,
             prompt=prompt,
             audio_path=wav_path,
-            backend="browser-mediarecorder",
+            backend=backend,
         )
         self._send_json(
             {
                 "audio_path": str(wav_path),
                 "metadata_path": str(metadata_path),
                 "prompt": prompt,
+                "backend": backend,
             }
         )
 
     def _handle_profile_build(self) -> None:
+        dataset_dir = self.server.config.dataset_dir
+        if not dataset_dir.exists() or not any(dataset_dir.glob("*.wav")):
+            raise TexeToSpeechError(
+                "Belum ada rekaman dataset. Buka bagian 'Dataset Suara Saya' di "
+                "halaman ini, klik 'Rekam Prompt' untuk tiap kata MVP "
+                "(angka 0..10 + operator), lalu coba Build Profile lagi."
+            )
         profile = build_voice_profile(
-            self.server.config.dataset_dir,
+            dataset_dir,
             self.server.config.profile_dir,
             name="browser",
         )
@@ -188,8 +216,17 @@ class TexeToSpeechHandler(BaseHTTPRequestHandler):
         output_name = f"tts-{uuid.uuid4().hex}.wav"
         output_path = audio_dir / output_name
         voice_reference = None
-        if use_voice_profile and self.server.config.default_voice_reference.exists():
-            voice_reference = self.server.config.default_voice_reference
+        if use_voice_profile:
+            from . import personal_voice
+
+            reference_path = self.server.config.default_voice_reference
+            if reference_path.exists():
+                voice_reference = reference_path
+            elif personal_voice.has_personal_voice_dataset():
+                # Backend personal-voice (concatenative) bekerja langsung dari
+                # rekaman dataset, tidak butuh speaker_reference.wav. Kirim
+                # path dataset agar speak_text mengaktifkan voice cloning.
+                voice_reference = reference_path
         result = speak_text(text, output_path=output_path, voice_reference=voice_reference)
         return f"/audio/{output_name}", result.backend
 
@@ -259,6 +296,29 @@ def run_web_app(
     web_config.upload_dir.mkdir(parents=True, exist_ok=True)
     web_config.dataset_dir.mkdir(parents=True, exist_ok=True)
     web_config.profile_dir.mkdir(parents=True, exist_ok=True)
+
+    # Pre-warm faster-whisper di background supaya saat user pertama kali
+    # rekam, tidak ada delay 100+ detik buat load model. Tidak fatal kalau
+    # gagal — chain backend lain tetap jalan.
+    try:
+        from . import faster_whisper_stt
+
+        if faster_whisper_stt.is_installed():
+            import threading
+
+            def _warmup() -> None:
+                try:
+                    name = faster_whisper_stt._resolve_model_name()
+                    print(f"[startup] Pre-warming whisper model `{name}`...")
+                    faster_whisper_stt._load_model(name)
+                    print(f"[startup] Whisper model `{name}` siap dipakai")
+                except Exception as exc:
+                    print(f"[startup] Pre-warm gagal: {exc}")
+
+            threading.Thread(target=_warmup, daemon=True).start()
+    except Exception:
+        pass
+
     server = TexeToSpeechServer((host, port), TexeToSpeechHandler, web_config)
     print(f"TexeToSpeech web app berjalan di http://{host}:{port}")
     server.serve_forever()
@@ -484,7 +544,7 @@ INDEX_HTML = r"""<!doctype html>
         <div class="row">
           <button id="textRun">Hitung</button>
           <button class="secondary" id="textSpeak">Hitung + Audio</button>
-          <label class="toggle"><input type="checkbox" id="useVoice"> pakai voice profile jika ada</label>
+          <label class="toggle"><input type="checkbox" id="useVoice"> pakai suara saya (personal voice / dataset)</label>
         </div>
         <div class="row">
           <div class="output" id="textOutput">Belum ada hasil.</div>
@@ -493,7 +553,8 @@ INDEX_HTML = r"""<!doctype html>
       </section>
 
       <section>
-        <h2>Speech to Text to Speech</h2>
+        <h2>Speech to Text + Aritmetika</h2>
+        <p class="small">Ucapkan operasi aritmetika. Sistem mengubah suara menjadi teks, lalu langsung menghitung hasilnya. Audio jawaban tidak diputar.</p>
         <div class="row">
           <button id="recordStt">Mulai Rekam</button>
           <button class="secondary" id="uploadButton">Upload Audio</button>
@@ -503,13 +564,16 @@ INDEX_HTML = r"""<!doctype html>
         <div class="row">
           <div class="output" id="sttOutput">Rekam atau upload audio berisi operasi aritmetika.</div>
         </div>
-        <audio id="sttAudio" controls hidden></audio>
       </section>
     </div>
 
     <div class="grid">
       <section>
         <h2>Dataset Suara Saya</h2>
+        <div class="row">
+          <label class="toggle"><input type="radio" name="promptScope" value="mvp" id="scopeMvp" checked> MVP (0..10 + operator)</label>
+          <label class="toggle"><input type="radio" name="promptScope" value="full" id="scopeFull"> Lengkap</label>
+        </div>
         <div class="prompt-box">
           <div class="prompt-index" id="promptIndex">Prompt 001</div>
           <div id="promptText">Memuat prompt...</div>
@@ -545,7 +609,6 @@ INDEX_HTML = r"""<!doctype html>
     const datasetOutput = document.getElementById('datasetOutput');
     const profileOutput = document.getElementById('profileOutput');
     const textAudio = document.getElementById('textAudio');
-    const sttAudio = document.getElementById('sttAudio');
     const sttMeter = document.getElementById('sttMeter');
     const datasetMeter = document.getElementById('datasetMeter');
 
@@ -554,6 +617,7 @@ INDEX_HTML = r"""<!doctype html>
     let recorder = null;
     let chunks = [];
     let activeStopHandler = null;
+    let pcmRecorder = null;
 
     for (const meter of [sttMeter, datasetMeter]) {
       for (let i = 0; i < 16; i += 1) {
@@ -662,35 +726,212 @@ INDEX_HTML = r"""<!doctype html>
       if (recorder && recorder.state !== 'inactive') recorder.stop();
     }
 
+    // PCM -> WAV recorder pakai Web Audio API. Tidak butuh ffmpeg di server.
+    async function startPcmRecording(meter) {
+      if (!navigator.mediaDevices) {
+        throw new Error('Browser belum mendukung getUserMedia.');
+      }
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const ctxClass = window.AudioContext || window.webkitAudioContext;
+      if (!ctxClass) {
+        stream.getTracks().forEach(track => track.stop());
+        throw new Error('Browser belum mendukung Web Audio API.');
+      }
+      const audioCtx = new ctxClass();
+      const source = audioCtx.createMediaStreamSource(stream);
+      const processor = audioCtx.createScriptProcessor(4096, 1, 1);
+      const buffers = [];
+      let totalLength = 0;
+      processor.onaudioprocess = event => {
+        const channel = event.inputBuffer.getChannelData(0);
+        const copy = new Float32Array(channel.length);
+        copy.set(channel);
+        buffers.push(copy);
+        totalLength += copy.length;
+      };
+      source.connect(processor);
+      processor.connect(audioCtx.destination);
+      meter.classList.add('recording');
+      pcmRecorder = {
+        stop: async () => {
+          processor.disconnect();
+          source.disconnect();
+          stream.getTracks().forEach(track => track.stop());
+          meter.classList.remove('recording');
+          const sampleRate = audioCtx.sampleRate;
+          await audioCtx.close();
+          const merged = new Float32Array(totalLength);
+          let offset = 0;
+          for (const chunk of buffers) {
+            merged.set(chunk, offset);
+            offset += chunk.length;
+          }
+          return encodeWavMono16(merged, sampleRate);
+        }
+      };
+    }
+
+    async function stopPcmRecording() {
+      if (!pcmRecorder) return null;
+      const current = pcmRecorder;
+      pcmRecorder = null;
+      return current.stop();
+    }
+
+    function encodeWavMono16(samples, sampleRate) {
+      const targetRate = 22050;
+      const downsampled = sampleRate === targetRate
+        ? samples
+        : downsampleFloat(samples, sampleRate, targetRate);
+      const dataLength = downsampled.length * 2;
+      const buffer = new ArrayBuffer(44 + dataLength);
+      const view = new DataView(buffer);
+      const writeString = (offset, str) => {
+        for (let i = 0; i < str.length; i += 1) {
+          view.setUint8(offset + i, str.charCodeAt(i));
+        }
+      };
+      writeString(0, 'RIFF');
+      view.setUint32(4, 36 + dataLength, true);
+      writeString(8, 'WAVE');
+      writeString(12, 'fmt ');
+      view.setUint32(16, 16, true);
+      view.setUint16(20, 1, true);
+      view.setUint16(22, 1, true);
+      view.setUint32(24, targetRate, true);
+      view.setUint32(28, targetRate * 2, true);
+      view.setUint16(32, 2, true);
+      view.setUint16(34, 16, true);
+      writeString(36, 'data');
+      view.setUint32(40, dataLength, true);
+      let offset = 44;
+      for (let i = 0; i < downsampled.length; i += 1) {
+        let sample = downsampled[i];
+        if (sample > 1) sample = 1;
+        else if (sample < -1) sample = -1;
+        view.setInt16(offset, sample < 0 ? sample * 0x8000 : sample * 0x7fff, true);
+        offset += 2;
+      }
+      return new Blob([view], { type: 'audio/wav' });
+    }
+
+    function downsampleFloat(samples, srcRate, dstRate) {
+      if (dstRate >= srcRate) return samples;
+      const ratio = srcRate / dstRate;
+      const outLength = Math.floor(samples.length / ratio);
+      const out = new Float32Array(outLength);
+      for (let i = 0; i < outLength; i += 1) {
+        const start = Math.floor(i * ratio);
+        const end = Math.min(samples.length, Math.floor((i + 1) * ratio));
+        let sum = 0;
+        let count = 0;
+        for (let j = start; j < end; j += 1) {
+          sum += samples[j];
+          count += 1;
+        }
+        out[i] = count > 0 ? sum / count : 0;
+      }
+      return out;
+    }
+
     document.getElementById('textRun').addEventListener('click', () => runText(false));
     document.getElementById('textSpeak').addEventListener('click', () => runText(true));
 
     document.getElementById('recordStt').addEventListener('click', async event => {
-      if (recorder) {
-        event.target.textContent = 'Mulai Rekam';
-        stopRecording();
-        return;
-      }
-      setStatus('Merekam STT...');
-      event.target.textContent = 'Stop Rekam';
-      try {
-        await startRecording(sttMeter, async blob => {
+      // Strategi: pakai Web Speech API browser kalau ada (Chrome/Edge).
+      // Tidak butuh whisper / SpeechRecognition di server.
+      const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+      if (!SpeechRecognition) {
+        // Fallback: rekam WAV via Web Audio API lalu kirim ke server.
+        // Server akan pakai personal-stt (template dari dataset user).
+        if (pcmRecorder) {
+          event.target.textContent = 'Mulai Rekam';
+          setStatus('Memproses audio (whisper, bisa 30-90 detik)...');
+          setOutput(sttOutput, 'Audio sedang ditranskripsi pakai faster-whisper. Tunggu sebentar...');
           try {
-            const data = await postAudio('/api/listen?speak=1', blob);
+            const blob = await stopPcmRecording();
+            const data = await postAudio('/api/listen?speak=0', blob);
             setOutput(sttOutput, renderEvaluation(data));
-            showAudio(sttAudio, data.audio_url);
             setStatus('Siap');
           } catch (error) {
             setOutput(sttOutput, error.message, true);
-            setStatus('Perlu backend STT');
-          } finally {
-            event.target.textContent = 'Mulai Rekam';
+            setStatus('Perlu cek dataset/STT');
           }
-        });
-      } catch (error) {
-        setOutput(sttOutput, error.message, true);
-        setStatus('Perlu izin mikrofon');
+          return;
+        }
+        try {
+          await startPcmRecording(sttMeter);
+          event.target.textContent = 'Stop Rekam';
+          setStatus('Merekam STT (WAV)...');
+        } catch (error) {
+          setOutput(sttOutput, error.message, true);
+          setStatus('Perlu izin mikrofon');
+        }
+        return;
+      }
+
+      // Web Speech API path.
+      if (event.target.dataset.listening === '1') {
         event.target.textContent = 'Mulai Rekam';
+        delete event.target.dataset.listening;
+        if (window._activeSpeechRecognition) {
+          window._activeSpeechRecognition.stop();
+        }
+        return;
+      }      const recognition = new SpeechRecognition();
+      recognition.lang = 'id-ID';
+      recognition.continuous = false;
+      recognition.interimResults = false;
+      recognition.maxAlternatives = 1;
+      window._activeSpeechRecognition = recognition;
+      sttMeter.classList.add('recording');
+      event.target.textContent = 'Stop Rekam';
+      event.target.dataset.listening = '1';
+      setStatus('Mendengarkan suara...');
+      let resolved = false;
+
+      recognition.onresult = async (event2) => {
+        resolved = true;
+        const transcript = event2.results[0][0].transcript;
+        try {
+          const data = await postJson('/api/listen?speak=0', {
+            transcript,
+            backend: 'web-speech-api'
+          });
+          setOutput(sttOutput, renderEvaluation(data));
+          setStatus('Siap');
+        } catch (error) {
+          setOutput(sttOutput, error.message, true);
+          setStatus('Gagal hitung');
+        }
+      };
+      recognition.onerror = (event2) => {
+        resolved = true;
+        const message = event2.error === 'no-speech'
+          ? 'Tidak ada suara terdeteksi.'
+          : `STT error: ${event2.error}`;
+        setOutput(sttOutput, message, true);
+        setStatus('Perlu coba lagi');
+      };
+      recognition.onend = () => {
+        sttMeter.classList.remove('recording');
+        event.target.textContent = 'Mulai Rekam';
+        delete event.target.dataset.listening;
+        window._activeSpeechRecognition = null;
+        if (!resolved) {
+          setOutput(sttOutput, 'Tidak ada hasil STT.', true);
+          setStatus('Coba lagi');
+        }
+      };
+
+      try {
+        recognition.start();
+      } catch (error) {
+        sttMeter.classList.remove('recording');
+        event.target.textContent = 'Mulai Rekam';
+        delete event.target.dataset.listening;
+        setOutput(sttOutput, error.message || 'Gagal start STT.', true);
+        setStatus('Coba lagi');
       }
     });
 
@@ -700,11 +941,11 @@ INDEX_HTML = r"""<!doctype html>
     document.getElementById('audioFile').addEventListener('change', async event => {
       const file = event.target.files[0];
       if (!file) return;
-      setStatus('Memproses audio...');
+      setStatus('Memproses audio (whisper, bisa 30-90 detik)...');
+      setOutput(sttOutput, 'Audio sedang ditranskripsi. Tunggu sebentar...');
       try {
-        const data = await postAudio('/api/listen?speak=1', file);
+        const data = await postAudio('/api/listen?speak=0', file);
         setOutput(sttOutput, renderEvaluation(data));
-        showAudio(sttAudio, data.audio_url);
         setStatus('Siap');
       } catch (error) {
         setOutput(sttOutput, error.message, true);
@@ -728,37 +969,34 @@ INDEX_HTML = r"""<!doctype html>
     });
 
     document.getElementById('recordDataset').addEventListener('click', async event => {
-      if (recorder) {
+      if (pcmRecorder) {
         event.target.textContent = 'Rekam Prompt';
-        stopRecording();
-        return;
-      }
-      setStatus('Merekam dataset...');
-      event.target.textContent = 'Stop Rekam';
-      try {
-        await startRecording(datasetMeter, async blob => {
+        setStatus('Menyimpan rekaman...');
+        try {
+          const blob = await stopPcmRecording();
           const index = promptCursor + 1;
           const prompt = prompts[promptCursor];
-          try {
-            const data = await postAudio('/api/dataset/record', blob, {
-              'X-Prompt-Index': String(index),
-              'X-Prompt-Text': encodeURIComponent(prompt)
-            });
-            setOutput(datasetOutput, `Tersimpan: ${data.audio_path}\nPrompt: ${data.prompt}`);
-            promptCursor = Math.min(promptCursor + 1, prompts.length - 1);
-            renderPrompt();
-            setStatus('Siap');
-          } catch (error) {
-            setOutput(datasetOutput, error.message, true);
-            setStatus('Gagal simpan dataset');
-          } finally {
-            event.target.textContent = 'Rekam Prompt';
-          }
-        });
+          const data = await postAudio('/api/dataset/record', blob, {
+            'X-Prompt-Index': String(index),
+            'X-Prompt-Text': encodeURIComponent(prompt)
+          });
+          setOutput(datasetOutput, `Tersimpan: ${data.audio_path}\nPrompt: ${data.prompt}\nBackend: ${data.backend || 'browser'}`);
+          promptCursor = Math.min(promptCursor + 1, prompts.length - 1);
+          renderPrompt();
+          setStatus('Siap');
+        } catch (error) {
+          setOutput(datasetOutput, error.message, true);
+          setStatus('Gagal simpan dataset');
+        }
+        return;
+      }
+      try {
+        await startPcmRecording(datasetMeter);
+        event.target.textContent = 'Stop Rekam';
+        setStatus('Merekam dataset (WAV)...');
       } catch (error) {
         setOutput(datasetOutput, error.message, true);
         setStatus('Perlu izin mikrofon');
-        event.target.textContent = 'Rekam Prompt';
       }
     });
 
@@ -774,13 +1012,20 @@ INDEX_HTML = r"""<!doctype html>
       }
     });
 
-    fetch('/api/prompts')
-      .then(response => response.json())
-      .then(data => {
-        prompts = data.prompts || [];
-        renderPrompt();
-      })
-      .catch(error => setOutput(datasetOutput, error.message, true));
+    function loadPrompts(scope) {
+      return fetch('/api/prompts?scope=' + encodeURIComponent(scope))
+        .then(response => response.json())
+        .then(data => {
+          prompts = data.prompts || [];
+          promptCursor = 0;
+          renderPrompt();
+        })
+        .catch(error => setOutput(datasetOutput, error.message, true));
+    }
+    document.querySelectorAll('input[name="promptScope"]').forEach(input => {
+      input.addEventListener('change', event => loadPrompts(event.target.value));
+    });
+    loadPrompts('mvp');
   </script>
 </body>
 </html>

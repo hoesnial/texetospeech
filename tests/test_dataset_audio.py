@@ -1,13 +1,12 @@
 from __future__ import annotations
 
 import math
-import shutil
 import tempfile
 import unittest
 import wave
 from pathlib import Path
 
-from texetospeech.audio import build_voice_profile
+from texetospeech.audio import build_voice_profile, convert_to_wav
 from texetospeech.dataset import append_metadata, read_prompts
 
 
@@ -31,7 +30,6 @@ class DatasetAudioTest(unittest.TestCase):
             self.assertIn("index,audio_path,prompt,backend", text)
             self.assertIn("1,recordings/001.wav,satu,test", text)
 
-    @unittest.skipIf(shutil.which("ffmpeg") is None, "ffmpeg tidak tersedia")
     def test_build_voice_profile(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -46,6 +44,20 @@ class DatasetAudioTest(unittest.TestCase):
             self.assertEqual(result.source_count, 2)
             self.assertTrue((profile / "speaker_reference.wav").exists())
             self.assertTrue((profile / "profile.json").exists())
+
+    def test_convert_to_wav_handles_existing_wav_without_ffmpeg(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = root / "in.wav"
+            target = root / "out.wav"
+            _write_test_wav(source, frequency=440)
+
+            result = convert_to_wav(source, target, sample_rate=22050)
+            self.assertTrue(result.exists())
+            with wave.open(str(result), "rb") as audio:
+                self.assertEqual(audio.getnchannels(), 1)
+                self.assertEqual(audio.getsampwidth(), 2)
+                self.assertEqual(audio.getframerate(), 22050)
 
 
 def _write_test_wav(path: Path, *, frequency: int = 440) -> None:

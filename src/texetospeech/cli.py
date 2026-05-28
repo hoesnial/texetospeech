@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 
 from .audio import build_voice_profile, record_wav
@@ -42,6 +43,15 @@ def build_parser() -> argparse.ArgumentParser:
         "--voice-reference",
         help="File wav referensi suara untuk backend voice cloning opsional.",
     )
+    text_parser.add_argument(
+        "--my-voice",
+        action="store_true",
+        help=(
+            "Pakai suara sendiri (concatenative dari rekaman dataset). "
+            "Tidak butuh model neural. Hanya butuh recordings/browser_dataset/ "
+            "atau recordings/my_voice/ berisi dataset yang sudah direkam."
+        ),
+    )
     text_parser.set_defaults(handler=handle_text)
 
     listen_parser = subparsers.add_parser(
@@ -52,12 +62,34 @@ def build_parser() -> argparse.ArgumentParser:
         "--audio",
         help="Path audio. Untuk demo tanpa STT, boleh memakai file .txt berisi transkrip.",
     )
+    listen_parser.add_argument(
+        "--transcript",
+        help=(
+            "Transkrip teks langsung untuk skip STT (fallback saat tidak ada "
+            "whisper / SpeechRecognition)."
+        ),
+    )
+    listen_parser.add_argument(
+        "--whisper-model",
+        choices=["tiny", "base", "small", "medium", "large-v3-turbo", "large-v3"],
+        help=(
+            "Pilih model faster-whisper. tiny=tercepat, base=balance ringan, "
+            "small=akurasi tinggi, medium=akurasi sangat tinggi (RAM 4GB+), "
+            "large-v3-turbo=default paling akurat dgn kecepatan oke, "
+            "large-v3=akurasi maksimal absolut (RAM 8GB+)."
+        ),
+    )
     listen_parser.add_argument("--json", action="store_true", help="Cetak output JSON.")
     listen_parser.add_argument("--speak", action="store_true", help="Bacakan jawaban.")
     listen_parser.add_argument("--out", help="Simpan audio jawaban ke file.")
     listen_parser.add_argument(
         "--voice-reference",
         help="File wav referensi suara untuk backend voice cloning opsional.",
+    )
+    listen_parser.add_argument(
+        "--my-voice",
+        action="store_true",
+        help="Pakai suara sendiri (concatenative dari rekaman dataset).",
     )
     listen_parser.set_defaults(handler=handle_listen)
 
@@ -67,6 +99,11 @@ def build_parser() -> argparse.ArgumentParser:
     tts_parser.add_argument(
         "--voice-reference",
         help="File wav referensi suara untuk backend voice cloning opsional.",
+    )
+    tts_parser.add_argument(
+        "--my-voice",
+        action="store_true",
+        help="Pakai suara sendiri (concatenative dari rekaman dataset).",
     )
     tts_parser.set_defaults(handler=handle_tts)
 
@@ -78,6 +115,15 @@ def build_parser() -> argparse.ArgumentParser:
         "--out",
         default="data/dataset_prompts.txt",
         help="Path output prompt dataset.",
+    )
+    prompts_parser.add_argument(
+        "--scope",
+        choices=["full", "mvp"],
+        default="full",
+        help=(
+            "full = semua prompt; mvp = subset minimum (angka 0..10 + operator "
+            "dasar + frasa jawaban) yang langsung cocok untuk personal voice."
+        ),
     )
     prompts_parser.set_defaults(handler=handle_dataset_prompts)
 
@@ -212,6 +258,27 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _resolve_voice_reference(args: argparse.Namespace) -> str | None:
+    """Pilih voice reference dari --voice-reference atau --my-voice."""
+
+    if getattr(args, "voice_reference", None):
+        return args.voice_reference
+    if getattr(args, "my_voice", False):
+        from . import personal_voice
+
+        if not personal_voice.has_personal_voice_dataset():
+            print(
+                "[warn] --my-voice diminta tetapi dataset rekaman pribadi belum "
+                "ditemukan. Rekam dulu lewat web app atau `record-dataset`.",
+                file=sys.stderr,
+            )
+            return None
+        # Path placeholder agar speak_text masuk ke jalur voice cloning. Backend
+        # personal-voice akan mendeteksi dataset dan tidak butuh file ini.
+        return "voice_profiles/default/speaker_reference.wav"
+    return None
+
+
 def handle_text(args: argparse.Namespace) -> int:
     user_text = " ".join(args.text)
     result = evaluate_text(user_text)
@@ -224,15 +291,34 @@ def handle_text(args: argparse.Namespace) -> int:
         speech_result = speak_text(
             result.answer_text,
             output_path=args.out,
-            voice_reference=args.voice_reference,
+            voice_reference=_resolve_voice_reference(args),
         )
         if speech_result.output_path:
             print(f"Audio disimpan: {speech_result.output_path}")
+        print(f"Backend TTS: {speech_result.backend}")
     return 0
 
 
 def handle_listen(args: argparse.Namespace) -> int:
-    transcript = transcribe_audio(args.audio)
+    if getattr(args, "whisper_model", None):
+        os.environ["TEXETOSPEECH_WHISPER_MODEL"] = args.whisper_model
+
+    if args.transcript:
+        from .speech import TranscriptResult
+
+        transcript = TranscriptResult(
+            text=args.transcript.strip(),
+            backend="manual-transcript",
+            source_path=None,
+        )
+    else:
+        if not args.audio:
+            print(
+                "Argumen --audio atau --transcript wajib diisi.",
+                file=sys.stderr,
+            )
+            return 1
+        transcript = transcribe_audio(args.audio)
     result = evaluate_text(transcript.text)
     payload = {
         "transcript": transcript.text,
@@ -249,10 +335,11 @@ def handle_listen(args: argparse.Namespace) -> int:
         speech_result = speak_text(
             result.answer_text,
             output_path=args.out,
-            voice_reference=args.voice_reference,
+            voice_reference=_resolve_voice_reference(args),
         )
         if speech_result.output_path:
             print(f"Audio disimpan: {speech_result.output_path}")
+        print(f"Backend TTS: {speech_result.backend}")
     return 0
 
 
@@ -261,16 +348,17 @@ def handle_tts(args: argparse.Namespace) -> int:
     result = speak_text(
         text,
         output_path=args.out,
-        voice_reference=args.voice_reference,
+        voice_reference=_resolve_voice_reference(args),
     )
     if result.output_path:
         print(f"Audio disimpan: {result.output_path}")
+    print(f"Backend TTS: {result.backend}")
     return 0
 
 
 def handle_dataset_prompts(args: argparse.Namespace) -> int:
-    output_path = write_prompts(args.out)
-    print(f"Prompt dataset ditulis: {output_path}")
+    output_path = write_prompts(args.out, scope=args.scope)
+    print(f"Prompt dataset ({args.scope}) ditulis: {output_path}")
     return 0
 
 
